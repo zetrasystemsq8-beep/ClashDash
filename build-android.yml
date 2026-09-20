@@ -1,0 +1,309 @@
+name: Build CLASHDASH Android APK
+
+# Runs by hand (Actions tab -> this workflow -> Run workflow) and on every push to main.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Check Unity license secrets
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        run: |
+          if [ -z "$UNITY_LICENSE" ] || [ -z "$UNITY_EMAIL" ] || [ -z "$UNITY_PASSWORD" ]; then
+            echo "::error::Missing secrets. Add UNITY_LICENSE, UNITY_EMAIL and UNITY_PASSWORD in Settings > Secrets and variables > Actions. See START_HERE_BUILD_APK.md."
+            exit 1
+          fi
+
+      - name: Prepare Unity project
+        run: |
+          set -e
+          P=unity_project
+          rm -rf "$P"
+          mkdir -p "$P/Assets" "$P/Packages" "$P/ProjectSettings"
+
+          if [ -d Assets ]; then
+            echo "Repo already has an Assets folder - using it as it is."
+            cp -r Assets/. "$P/Assets/"
+          else
+            echo "Flat upload detected - sorting files into Unity folders..."
+            MISSING=0
+            while IFS='|' read -r name dir; do
+              [ -z "$name" ] && continue
+              src=$(find . -type f -name "$name" -not -path "./$P/*" -not -path "./.git/*" | head -n 1)
+              if [ -z "$src" ]; then
+                echo "MISSING FILE: $name"
+                MISSING=$((MISSING+1))
+                continue
+              fi
+              mkdir -p "$P/$dir"
+              cp "$src" "$P/$dir/$name"
+            done <<'MAP'
+          AmbientStreaks.cs|Assets/Scripts/VFX
+          AndroidSetup.cs|Assets/Editor
+          Arena02Builder.cs|Assets/Editor
+          Arena03Builder.cs|Assets/Editor
+          ArenaAudio.cs|Assets/Scripts/Audio
+          ArenaBuildKit.cs|Assets/Editor
+          ArenaCatalog.cs|Assets/Scripts/Progression
+          ArenaMover.cs|Assets/Scripts/Arena
+          ArenaMusic.cs|Assets/Scripts/Audio
+          ArenaOneBuilder.cs|Assets/Editor
+          ArenaVfx.cs|Assets/Scripts/VFX
+          BoostPad.cs|Assets/Scripts/Arena
+          BuildEverything.cs|Assets/Editor
+          CD_BoostChevrons.shader|Assets/Resources/Shaders
+          CD_EnergyField.shader|Assets/Resources/Shaders
+          Checkpoint.cs|Assets/Scripts/Arena
+          ClashDashBootstrap.cs|Assets/Scripts/Core
+          ClashDashExtrasBootstrap.cs|Assets/Scripts/Core
+          CoinPickup.cs|Assets/Scripts/Arena
+          DebugOverlay.cs|Assets/Scripts/Core
+          FallingTile.cs|Assets/Scripts/Arena
+          FinishGate.cs|Assets/Scripts/Arena
+          FinishOrbitCamera.cs|Assets/Scripts/Camera
+          FinishPortal.cs|Assets/Scripts/Arena
+          GameManager.cs|Assets/Scripts/Core
+          HapticsFx.cs|Assets/Scripts/Core
+          Hazard.cs|Assets/Scripts/Arena
+          HoloFlicker.cs|Assets/Scripts/VFX
+          IntroFlyover.cs|Assets/Scripts/Camera
+          MainMenuController.cs|Assets/Scripts/Menu
+          MainMenuSceneBuilder.cs|Assets/Editor
+          MenuArenaCards.cs|Assets/Scripts/Menu
+          MeteorShower.cs|Assets/Scripts/Arena
+          MobileJoystick.cs|Assets/Scripts/Input
+          MobileJumpButton.cs|Assets/Scripts/Input
+          PauseMenu.cs|Assets/Scripts/UI
+          Pendulum.cs|Assets/Scripts/Arena
+          PerformanceGuard.cs|Assets/Scripts/Core
+          PlayerBoost.cs|Assets/Scripts/Player
+          PlayerController.cs|Assets/Scripts/Player
+          ProceduralAudio.cs|Assets/Scripts/Audio
+          ProgressGuard.cs|Assets/Scripts/Progression
+          ProgressStore.cs|Assets/Scripts/Progression
+          ProjectValidator.cs|Assets/Editor
+          PulseGate.cs|Assets/Scripts/Arena
+          RunHud.cs|Assets/Scripts/UI
+          RunStats.cs|Assets/Scripts/Progression
+          ScreenFx.cs|Assets/Scripts/VFX
+          ThirdPersonCamera.cs|Assets/Scripts/Camera
+          WorldAtmosphere.cs|Assets/Scripts/VFX
+          MAP
+            if [ "$MISSING" -gt 0 ]; then
+              echo "::error::$MISSING file(s) are missing from the repo. Upload them to the repo root and run again."
+              exit 1
+            fi
+          fi
+
+          mkdir -p "$P/Assets/Editor"
+          cat > "$P/Assets/Editor/ClashDashCi.cs" <<'CICS'
+          using System;
+          using System.Collections.Generic;
+          using System.IO;
+          using UnityEditor;
+          #if UNITY_2021_2_OR_NEWER
+          using UnityEditor.Build;
+          #endif
+          using UnityEditor.Build.Reporting;
+          using UnityEngine;
+          using UnityEngine.Rendering;
+
+          namespace Zetra.ClashDash.EditorTools
+          {
+              /// <summary>
+              /// Headless build used by GitHub Actions (GameCI): generates every CLASHDASH scene, applies Android
+              /// settings and builds an APK. Entry point: Zetra.ClashDash.EditorTools.ClashDashCi.BuildAndroid
+              /// </summary>
+              public static class ClashDashCi
+              {
+                  public static void BuildAndroid()
+                  {
+                      try
+                      {
+                          Debug.Log("[CLASHDASH CI] Building scenes...");
+                          ArenaOneBuilder.BuildArenaOne();
+                          Arena02Builder.Build();
+                          Arena03Builder.Build();
+                          MainMenuSceneBuilder.Build();
+
+                          ApplyAndroidSettings();
+
+                          List<string> scenes = new List<string>();
+                          string[] wanted =
+                          {
+                              "Assets/Scenes/ClashDash_MainMenu.unity",
+                              "Assets/Scenes/Arena01_TheTest.unity",
+                              "Assets/Scenes/Arena02_TheCrucible.unity",
+                              "Assets/Scenes/Arena03_TheTribunal.unity"
+                          };
+                          for (int i = 0; i < wanted.Length; i++)
+                          {
+                              if (File.Exists(wanted[i])) scenes.Add(wanted[i]);
+                              else Debug.LogWarning("[CLASHDASH CI] Missing scene: " + wanted[i]);
+                          }
+
+                          if (scenes.Count == 0)
+                          {
+                              Debug.LogError("[CLASHDASH CI] No scenes were generated - see the errors above.");
+                              EditorApplication.Exit(1);
+                              return;
+                          }
+
+                          // Make sure Build Settings match what we are about to build.
+                          List<EditorBuildSettingsScene> settingsScenes = new List<EditorBuildSettingsScene>();
+                          for (int i = 0; i < scenes.Count; i++) settingsScenes.Add(new EditorBuildSettingsScene(scenes[i], true));
+                          EditorBuildSettings.scenes = settingsScenes.ToArray();
+
+                          string output = ResolveOutputPath();
+                          Debug.Log("[CLASHDASH CI] Building APK: " + output + " (" + scenes.Count + " scenes)");
+
+                          EditorUserBuildSettings.buildAppBundle = false;
+
+                          BuildPlayerOptions options = new BuildPlayerOptions();
+                          options.scenes = scenes.ToArray();
+                          options.locationPathName = output;
+                          options.target = BuildTarget.Android;
+                          options.options = BuildOptions.None;
+
+                          BuildReport report = BuildPipeline.BuildPlayer(options);
+                          if (report.summary.result != BuildResult.Succeeded)
+                          {
+                              Debug.LogError("[CLASHDASH CI] Build " + report.summary.result + " with " + report.summary.totalErrors + " error(s).");
+                              EditorApplication.Exit(1);
+                              return;
+                          }
+
+                          Debug.Log("[CLASHDASH CI] APK built OK: " + output + " (" + (report.summary.totalSize / (1024f * 1024f)).ToString("0.0") + " MB)");
+                          EditorApplication.Exit(0);
+                      }
+                      catch (Exception e)
+                      {
+                          Debug.LogException(e);
+                          EditorApplication.Exit(1);
+                      }
+                  }
+
+                  private static string ResolveOutputPath()
+                  {
+                      string path = null;
+                      string[] args = Environment.GetCommandLineArgs();
+                      for (int i = 0; i < args.Length - 1; i++)
+                      {
+                          if (args[i] == "-customBuildPath") path = args[i + 1];
+                      }
+
+                      if (string.IsNullOrEmpty(path)) path = "build/Android/CLASHDASH";
+                      if (!path.EndsWith(".apk")) path += ".apk";
+
+                      string dir = Path.GetDirectoryName(path);
+                      if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                      return path;
+                  }
+
+                  private static void ApplyAndroidSettings()
+                  {
+                      PlayerSettings.companyName = "ZETRA";
+                      PlayerSettings.productName = "CLASHDASH";
+                      PlayerSettings.bundleVersion = "0.1.0";
+                      PlayerSettings.Android.bundleVersionCode = 1;
+
+          #if UNITY_2021_2_OR_NEWER
+                      PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android, "com.zetra.clashdash");
+                      PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);
+          #else
+                      PlayerSettings.SetApplicationIdentifier(BuildTargetGroup.Android, "com.zetra.clashdash");
+                      PlayerSettings.SetScriptingBackend(BuildTargetGroup.Android, ScriptingImplementation.IL2CPP);
+          #endif
+
+                      PlayerSettings.defaultInterfaceOrientation = UIOrientation.AutoRotation;
+                      PlayerSettings.allowedAutorotateToPortrait = false;
+                      PlayerSettings.allowedAutorotateToPortraitUpsideDown = false;
+                      PlayerSettings.allowedAutorotateToLandscapeLeft = true;
+                      PlayerSettings.allowedAutorotateToLandscapeRight = true;
+
+                      PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARM64;
+                      PlayerSettings.Android.minSdkVersion = AndroidSdkVersions.AndroidApiLevel24;
+                      PlayerSettings.Android.targetSdkVersion = AndroidSdkVersions.AndroidApiLevelAuto;
+
+                      PlayerSettings.SetUseDefaultGraphicsAPIs(BuildTarget.Android, false);
+                      PlayerSettings.SetGraphicsAPIs(BuildTarget.Android, new[] { GraphicsDeviceType.OpenGLES3, GraphicsDeviceType.Vulkan });
+
+                      QualitySettings.vSyncCount = 0;
+                      QualitySettings.shadowDistance = 60f;
+                      QualitySettings.shadowCascades = 2;
+                      QualitySettings.pixelLightCount = 2;
+                      QualitySettings.antiAliasing = 2;
+                      QualitySettings.softParticles = false;
+                      QualitySettings.realtimeReflectionProbes = false;
+                  }
+              }
+          }
+          CICS
+
+          cat > "$P/Packages/manifest.json" <<'MANIFEST'
+          {
+            "dependencies": {
+              "com.unity.ugui": "1.0.0",
+              "com.unity.modules.ai": "1.0.0",
+              "com.unity.modules.androidjni": "1.0.0",
+              "com.unity.modules.animation": "1.0.0",
+              "com.unity.modules.audio": "1.0.0",
+              "com.unity.modules.imgui": "1.0.0",
+              "com.unity.modules.jsonserialize": "1.0.0",
+              "com.unity.modules.particlesystem": "1.0.0",
+              "com.unity.modules.physics": "1.0.0",
+              "com.unity.modules.ui": "1.0.0"
+            }
+          }
+          MANIFEST
+
+          printf '%s\n' 'm_EditorVersion: 2022.3.20f1' > "$P/ProjectSettings/ProjectVersion.txt"
+
+          echo "Unity project ready:"
+          find "$P/Assets" -type f -name '*.cs' | wc -l
+          echo "C# files in project"
+
+
+      - name: Cache Unity Library
+        uses: actions/cache@v4
+        with:
+          path: unity_project/Library
+          key: Library-Android-${{ github.run_number }}
+          restore-keys: |
+            Library-Android-
+
+      - name: Build Android APK
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: unity_project
+          unityVersion: 2022.3.20f1
+          targetPlatform: Android
+          androidExportType: androidPackage
+          buildMethod: Zetra.ClashDash.EditorTools.ClashDashCi.BuildAndroid
+          versioning: None
+          allowDirtyBuild: true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CLASHDASH-Android-APK
+          path: build/Android
+          if-no-files-found: error
