@@ -84,6 +84,43 @@ namespace Zetra.ClashDash.EditorTools
             }
         }
 
+        public static void PrepareCloudBuild()
+        {
+            Debug.Log("[CLASHDASH CI] Preparing scenes for cloud build...");
+            ArenaOneBuilder.BuildArenaOne();
+            Arena02Builder.Build();
+            Arena03Builder.Build();
+            MainMenuSceneBuilder.Build();
+
+            ApplyAndroidSettings();
+
+            List<string> scenes = new List<string>();
+            string[] wanted =
+            {
+                "Assets/Scenes/ClashDash_MainMenu.unity",
+                "Assets/Scenes/Arena01_TheTest.unity",
+                "Assets/Scenes/Arena02_TheCrucible.unity",
+                "Assets/Scenes/Arena03_TheTribunal.unity"
+            };
+            for (int i = 0; i < wanted.Length; i++)
+            {
+                if (File.Exists(wanted[i])) scenes.Add(wanted[i]);
+                else Debug.LogWarning("[CLASHDASH CI] Missing scene: " + wanted[i]);
+            }
+
+            if (scenes.Count == 0)
+            {
+                Debug.LogError("[CLASHDASH CI] No scenes were generated - see the errors above.");
+                return;
+            }
+
+            List<EditorBuildSettingsScene> settingsScenes = new List<EditorBuildSettingsScene>();
+            for (int i = 0; i < scenes.Count; i++) settingsScenes.Add(new EditorBuildSettingsScene(scenes[i], true));
+            EditorBuildSettings.scenes = settingsScenes.ToArray();
+
+            Debug.Log("[CLASHDASH CI] Scenes ready: " + scenes.Count);
+        }
+
         private static string ResolveOutputPath()
         {
             string path = null;
